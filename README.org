@@ -1,0 +1,26 @@
+* Org Babel yara
+
+  Add [[https://virustotal.github.io/yara][yara]] language support to ~org-babel~ in ~Org-mode~.
+  
+** Example
+
+   Here is an example in an org file:
+
+   #+begin_src yara :target /bin/curl :cmd-line -s :var filesize=10
+     rule Hello {
+       strings:
+         $a = "hello"
+       condition:
+         $a and filesize > 10
+     }
+   #+end_src
+
+   Move the cursor to above code block, then tap 'ctrl+c, ctrl+c' to eval the
+   code block. That actually equals to run the following shell command:
+
+   #+begin_src bash
+     yara $rulefile /bin/curl -d=filesize=10 -s
+   #+end_src
+
+   , where $rulefile is a file containing the code block mentioned above.
+

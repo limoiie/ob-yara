@@ -70,7 +70,7 @@
 (add-to-list 'org-babel-tangle-lang-exts '("yara" . "yara"))
 
 ;; declare default header arguments for this language
-(defvar org-babel-default-header-args:yara '((:cmd-line . "-s")))
+(defvar org-babel-default-header-args:yara '((:print-strings . t)))
 
 (defun org-babel-expand-body:yara (body _params &optional _processed_params)
   "Expand BODY according to PARAMS, return the expanded body."
@@ -84,37 +84,89 @@ body of the source code and return the results as emacs-lisp."
   (message "executing Yara source code block")
   (let* ((processed-params (org-babel-process-params params))
          (result-params (assq :result-params processed-params))
-         ;; external defined variables passing to yara
-         (vars (org-babel--get-vars processed-params))
-         ;; options passing to yara
-         (cmd-line (cdr (assq :cmd-line processed-params)))
-         ;; the target to be evaluted, could be a file, a dir or a pid
-         (target (cdr (assq :target processed-params)))
          ;; expand the body with `org-babel-expand-body:yara'
          (full-body (org-babel-expand-body:yara
                      body params processed-params))
-         ;; yara rule file filled with the source code block
+         ;; fill the source code block into a temp file
          (rule-file (let ((file (org-babel-temp-file "yara-")))
                       (with-temp-file file (insert full-body)) file))
+         (processed-params (cons `(:rule . ,rule-file) processed-params))
          ;; reassemble params into a command line
-         (cmd (mapconcat #'identity
-                         (append
-                          (list "yara" cmd-line)
-                          (mapcar (lambda (pair)
-                                    (format "-d=%s=%s"
-                                            (car pair)
-                                            (org-babel-yara-var-to-yara
-                                             (cdr pair))))
-                                  vars)
-                          (list (org-babel-process-file-name rule-file)
-                                (org-babel-process-file-name target)))
-                         " ")))
+         (yara-executable (list "yara"))
+         (cmd-parts (append
+                     yara-executable
+                     (org-babel-yara-vars-in-cmd-line processed-params)
+                     (org-babel-yara-options-in-cmd-line processed-params)))
+         (cmd (mapconcat #'identity (remove "" cmd-parts) " ")))
     (message "cmd: `%s'" cmd)
     (let ((results (org-babel-eval cmd "")))
       (org-babel-yara-table-or-string results result-params processed-params))))
 
+(defun org-babel-yara-vars-in-cmd-line (params)
+  "Convert PARAMS to yara command line format."
+  (mapcar (lambda (pair)
+            (format "--define=%s=%s"
+                    (car pair)
+                    (org-babel-yara-var-to-yara
+                     (cdr pair))))
+          (org-babel-yara--get-all-by-key :var params)))
+
+(defun org-babel-yara-options-in-cmd-line (params)
+  "Convert PARAMS to yara command line format."
+  (let ((opts `(;; original yara command-line options
+                (:compiled-rules "--compiled-rules" bool)
+                (:count "--count" bool)
+                (:fast-scan "--fast-scan" bool)
+                (:identifier "--identifier" string)
+                (:max-rules "--max-rules" number)
+                (:module-data "--module-data" string)
+                (:timeout "--timeout" integer)
+                (:threads "--threads" integer)
+                (:negate "--negate" bool)
+                (:no-warnings "--no-warnings" bool)
+                (:print-meta "--print-meta" bool)
+                (:print-module-data "--print-module-data" bool)
+                (:print-namespace "--print-namespace" bool)
+                (:print-stats "--print-stats" bool)
+                (:print-strings "--print-strings" bool)
+                (:print-string-length "--print-string-length" bool)
+                (:print-tags "--print-tags" bool)
+                (:recursive "--recursive" bool)
+                (:scan-list "--scan-list" string)
+                (:tag "--tag" string)
+                ;; additional options
+                (:cmd-line nil no-key-string) ; additional command-line options
+                (:rule nil no-key-string multiple)
+                ;; for following keys, only one of them can be specified at once
+                (:in-file nil no-key-string)
+                (:in-dir nil no-key-string)
+                (:in-pid nil no-key-integer))))
+    (apply #'append
+           (mapcar
+            (lambda (opt)
+              (let* ((multi-key (nth 3 opt))
+                     (opt-val-list
+                      (if (equal multi-key 'multiple)
+                          (org-babel-yara--get-all-by-key (car opt) params)
+                        (org-babel-yara--get-one-by-key (car opt) params)))
+                     (opt-key (nth 1 opt))
+                     (val-typ (nth 2 opt)))
+                (mapcar
+                 (lambda (opt-val)
+                   (cond
+                    ((not opt-val) "")
+                    ((equal val-typ 'bool) opt-key)
+                    ((equal val-typ 'string) (format "%s=%s" opt-key opt-val))
+                    ((equal val-typ 'integer) (format "%s=%d" opt-key opt-val))
+                    ((equal val-typ 'no-key-string) opt-val)
+                    ((equal val-typ 'no-key-integer) (format "%d" opt-val))
+                    (t (format "%s=%s" opt-key opt-val))))
+                 opt-val-list)
+                ))
+            opts))))
+
 (defun org-babel-yara-var-to-yara (var)
-  "Convert an elisp var into a string of template source code
+  "Convert an elisp var into a string of yara source code
 specifying a var of the same value."
   (format "%S" var))
 
@@ -133,6 +185,23 @@ Emacs-lisp table, otherwise return the results as a string."
    (org-babel-pick-name
     (cdr (assq :rowname-names params)) (cdr (assq :rownames params))))
   results)
+
+(defun org-babel-yara--get-all-by-key (key params)
+  "Return the babel header options by KEY in PARAMS.
+
+PARAMS is a quasi-alist of header args, which may contain
+multiple entries for the key `key'.  This function returns a
+list of the cdr of all the `key' entries."
+  (mapcar #'cdr
+	        (cl-remove-if-not (lambda (x) (eq (car x) key)) params)))
+
+(defun org-babel-yara--get-one-by-key (key params)
+  "Return the babel header option by KEY in PARAMS.
+
+PARAMS is a quasi-alist of header args, which may contain
+multiple entries for the key `key'.  This function returns a
+list of the cdr of the first `key' entry."
+  (list (cdr (assq key params))))
 
 ;;;###autoload
 (eval-after-load "org"
